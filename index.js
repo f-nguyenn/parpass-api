@@ -598,6 +598,157 @@ app.get('/api/members/:id/history', async (req, res) => {
     }
   });
   
+/**
+ * @swagger
+ * /api/stats/overview:
+ *   get:
+ *     summary: Get overall platform stats
+ *     tags: [Stats]
+ *     responses:
+ *       200:
+ *         description: Platform statistics
+ */
+app.get('/api/stats/overview', async (req, res) => {
+    try {
+      const stats = await db.query(`
+        SELECT
+          (SELECT COUNT(*) FROM members WHERE status = 'active') as active_members,
+          (SELECT COUNT(*) FROM golf_courses WHERE is_active = true) as total_courses,
+          (SELECT COUNT(*) FROM golf_utilization) as total_rounds,
+          (SELECT COUNT(*) FROM golf_utilization WHERE checked_in_at >= DATE_TRUNC('month', NOW())) as rounds_this_month
+      `);
+      res.json(stats.rows[0]);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+  
+  /**
+   * @swagger
+   * /api/stats/popular-courses:
+   *   get:
+   *     summary: Get most popular courses
+   *     tags: [Stats]
+   *     responses:
+   *       200:
+   *         description: List of courses by popularity
+   */
+  app.get('/api/stats/popular-courses', async (req, res) => {
+    try {
+      const result = await db.query(`
+        SELECT 
+          gc.id,
+          gc.name,
+          gc.city,
+          gc.tier_required,
+          COUNT(gu.id) as total_rounds,
+          COUNT(DISTINCT gu.member_id) as unique_members
+        FROM golf_courses gc
+        LEFT JOIN golf_utilization gu ON gc.id = gu.course_id
+        WHERE gc.is_active = true
+        GROUP BY gc.id, gc.name, gc.city, gc.tier_required
+        ORDER BY total_rounds DESC
+        LIMIT 10
+      `);
+      res.json(result.rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+  
+  /**
+   * @swagger
+   * /api/stats/rounds-by-month:
+   *   get:
+   *     summary: Get rounds played by month
+   *     tags: [Stats]
+   *     responses:
+   *       200:
+   *         description: Monthly round counts
+   */
+  app.get('/api/stats/rounds-by-month', async (req, res) => {
+    try {
+      const result = await db.query(`
+        SELECT 
+          TO_CHAR(DATE_TRUNC('month', checked_in_at), 'Mon YYYY') as month,
+          DATE_TRUNC('month', checked_in_at) as month_date,
+          COUNT(*) as rounds
+        FROM golf_utilization
+        WHERE checked_in_at >= NOW() - INTERVAL '6 months'
+        GROUP BY DATE_TRUNC('month', checked_in_at)
+        ORDER BY month_date ASC
+      `);
+      res.json(result.rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+  
+  /**
+   * @swagger
+   * /api/stats/tier-breakdown:
+   *   get:
+   *     summary: Get rounds by tier
+   *     tags: [Stats]
+   *     responses:
+   *       200:
+   *         description: Tier usage breakdown
+   */
+  app.get('/api/stats/tier-breakdown', async (req, res) => {
+    try {
+      const result = await db.query(`
+        SELECT 
+          gc.tier_required as tier,
+          COUNT(gu.id) as rounds
+        FROM golf_utilization gu
+        JOIN golf_courses gc ON gu.course_id = gc.id
+        GROUP BY gc.tier_required
+      `);
+      res.json(result.rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+  
+  /**
+   * @swagger
+   * /api/stats/top-members:
+   *   get:
+   *     summary: Get most active members
+   *     tags: [Stats]
+   *     responses:
+   *       200:
+   *         description: List of top members by usage
+   */
+  app.get('/api/stats/top-members', async (req, res) => {
+    try {
+      const result = await db.query(`
+        SELECT 
+          m.id,
+          m.first_name,
+          m.last_name,
+          hp.name as health_plan,
+          pt.name as tier,
+          COUNT(gu.id) as total_rounds
+        FROM members m
+        JOIN health_plans hp ON m.health_plan_id = hp.id
+        JOIN plan_tiers pt ON hp.plan_tier_id = pt.id
+        LEFT JOIN golf_utilization gu ON m.id = gu.member_id
+        WHERE m.status = 'active'
+        GROUP BY m.id, m.first_name, m.last_name, hp.name, pt.name
+        ORDER BY total_rounds DESC
+        LIMIT 10
+      `);
+      res.json(result.rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });  
 
 // Start server
 app.listen(PORT, () => {
