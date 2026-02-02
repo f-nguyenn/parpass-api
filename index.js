@@ -556,6 +556,49 @@ app.get('/api/health-plans', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/members/{id}/history:
+ *   get:
+ *     summary: Get member's round history
+ *     tags: [Members]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: List of rounds played
+ */
+app.get('/api/members/:id/history', async (req, res) => {
+    try {
+      const { id } = req.params;
+      const result = await db.query(`
+        SELECT 
+          gu.id,
+          gu.checked_in_at,
+          gu.holes_played,
+          gc.name as course_name,
+          gc.city,
+          gc.state,
+          gc.tier_required
+        FROM golf_utilization gu
+        JOIN golf_courses gc ON gu.course_id = gc.id
+        WHERE gu.member_id = $1
+        ORDER BY gu.checked_in_at DESC
+        LIMIT 50
+      `, [id]);
+      
+      res.json(result.rows);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+  
+
 // Start server
 app.listen(PORT, () => {
   console.log(`ParPass API running on http://localhost:${PORT}`);
