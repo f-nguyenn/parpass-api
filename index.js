@@ -748,7 +748,133 @@ app.get('/api/stats/overview', async (req, res) => {
       console.error(err);
       res.status(500).json({ error: 'Server error' });
     }
-  });  
+  });
+  
+  /**
+ * @swagger
+ * /api/members/{id}/recommendations:
+ *   get:
+ *     summary: Get personalized course recommendations
+ *     tags: [Members]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: List of recommended courses
+ */
+app.get('/api/members/:id/recommendations', async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      // Get member's tier
+      const memberResult = await db.query(`
+        SELECT m.id, pt.name as tier
+        FROM members m
+        JOIN health_plans hp ON m.health_plan_id = hp.id
+        JOIN plan_tiers pt ON hp.plan_tier_id = pt.id
+        WHERE m.id = $1
+      `, [id]);
+      
+      if (memberResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Member not found' });
+      }
+      
+      const member = memberResult.rows[0];
+      const isPremium = member.tier === 'premium';
+      
+      // Get courses the member has already played
+      const playedResult = await db.query(`
+        SELECT DISTINCT course_id FROM golf_utilization WHERE member_id = $1
+      `, [id]);
+      const playedIds = playedResult.rows.map(r => r.course_id);
+      
+      // Get cities the member has played in
+      const citiesResult = await db.query(`
+        SELECT DISTINCT gc.city 
+        FROM golf_utilization gu
+        JOIN golf_courses gc ON gu.course_id = gc.id
+        WHERE gu.member_id = $1
+      `, [id]);
+      const playedCities = citiesResult.rows.map(r => r.city);
+      
+      // Build recommendation query
+      // Prioritize: 
+      // 1. Courses in cities they've played (familiar area)
+      // 2. Popular courses among same-tier members
+      // 3. Courses they haven't played yet
+      const recommendations = await db.query(`
+        WITH course_popularity AS (
+          SELECT 
+            gc.id,
+            gc.name,
+            gc.city,
+            gc.state,
+            gc.tier_required,
+            gc.holes,
+            gc.phone,
+            COUNT(gu.id) as total_plays,
+            COUNT(DISTINCT gu.member_id) as unique_players
+          FROM golf_courses gc
+          LEFT JOIN golf_utilization gu ON gc.id = gu.course_id
+          WHERE gc.is_active = true
+          ${isPremium ? '' : "AND gc.tier_required = 'core'"}
+          GROUP BY gc.id
+        )
+        SELECT 
+          *,
+          CASE 
+            WHEN city = ANY($2) THEN 30
+            ELSE 0
+          END +
+          CASE 
+            WHEN total_plays > 5 THEN 20
+            WHEN total_plays > 2 THEN 10
+            ELSE 0
+          END +
+          CASE
+            WHEN unique_players > 3 THEN 15
+            WHEN unique_players > 1 THEN 8
+            ELSE 0
+          END as score
+        FROM course_popularity
+        WHERE id != ALL($1)
+        ORDER BY score DESC, total_plays DESC
+        LIMIT 5
+      `, [playedIds.length > 0 ? playedIds : ['00000000-0000-0000-0000-000000000000'], playedCities]);
+      
+      // Add recommendation reasons
+      const withReasons = recommendations.rows.map(course => {
+        const reasons = [];
+        if (playedCities.includes(course.city)) {
+          reasons.push(`You've played in ${course.city} before`);
+        }
+        if (parseInt(course.unique_players) > 1) {
+          reasons.push(`Popular with ${course.unique_players} members`);
+        }
+        if (course.tier_required === 'premium') {
+          reasons.push('Premium course');
+        }
+        if (reasons.length === 0) {
+          reasons.push('Recommended for you');
+        }
+        
+        return {
+          ...course,
+          reason: reasons[0]
+        };
+      });
+      
+      res.json(withReasons);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+  
 
 // Start server
 app.listen(PORT, () => {
