@@ -223,6 +223,10 @@ app.delete('/api/members/:id/favorites/:courseId', async (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`ParPass API running on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`ParPass API running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
