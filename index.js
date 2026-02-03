@@ -127,17 +127,33 @@ app.get('/', (req, res) => {
 app.get('/api/courses', async (req, res) => {
   try {
     const { tier } = req.query;
-    let query = 'SELECT * FROM golf_courses WHERE is_active = true';
+    let query = `
+      SELECT
+        gc.*,
+        ROUND(AVG(r.rating)::numeric, 1) as average_rating,
+        COUNT(r.id) as review_count
+      FROM golf_courses gc
+      LEFT JOIN reviews r ON gc.id = r.course_id
+      WHERE gc.is_active = true
+    `;
     const params = [];
-    
+
     if (tier) {
-      query += ' AND tier_required = $1';
+      query += ' AND gc.tier_required = $1';
       params.push(tier);
     }
-    
-    query += ' ORDER BY name';
+
+    query += ' GROUP BY gc.id ORDER BY gc.name';
     const result = await db.query(query, params);
-    res.json(result.rows);
+
+    // Convert types
+    const courses = result.rows.map(row => ({
+      ...row,
+      average_rating: row.average_rating ? parseFloat(row.average_rating) : null,
+      review_count: parseInt(row.review_count)
+    }));
+
+    res.json(courses);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -875,6 +891,152 @@ app.get('/api/members/:id/recommendations', async (req, res) => {
     }
   });
   
+
+/**
+ * @swagger
+ * /api/courses/{id}/reviews:
+ *   get:
+ *     summary: Get all reviews for a course
+ *     tags: [Reviews]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: List of reviews
+ *   post:
+ *     summary: Add or update a review for a course
+ *     tags: [Reviews]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - member_id
+ *               - rating
+ *             properties:
+ *               member_id:
+ *                 type: string
+ *               rating:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 5
+ *               comment:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Review created/updated
+ *       403:
+ *         description: Member has not played this course
+ */
+app.get('/api/courses/:id/reviews', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.query(`
+      SELECT
+        r.id,
+        r.rating,
+        r.comment,
+        r.created_at,
+        m.first_name as member_first_name
+      FROM reviews r
+      JOIN members m ON r.member_id = m.id
+      WHERE r.course_id = $1
+      ORDER BY r.created_at DESC
+    `, [id]);
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/courses/:id/reviews', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { member_id, rating, comment } = req.body;
+
+    // Validate rating
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+    }
+
+    // Check if member has played this course
+    const playedResult = await db.query(`
+      SELECT id FROM golf_utilization
+      WHERE member_id = $1 AND course_id = $2
+      LIMIT 1
+    `, [member_id, id]);
+
+    if (playedResult.rows.length === 0) {
+      return res.status(403).json({ error: 'You must play this course before leaving a review' });
+    }
+
+    // Upsert review
+    const result = await db.query(`
+      INSERT INTO reviews (member_id, course_id, rating, comment)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (member_id, course_id)
+      DO UPDATE SET rating = $3, comment = $4, created_at = NOW()
+      RETURNING *
+    `, [member_id, id, rating, comment || null]);
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/courses/{id}/rating:
+ *   get:
+ *     summary: Get average rating for a course
+ *     tags: [Reviews]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Course rating summary
+ */
+app.get('/api/courses/:id/rating', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.query(`
+      SELECT
+        ROUND(AVG(rating)::numeric, 1) as average_rating,
+        COUNT(*) as review_count
+      FROM reviews
+      WHERE course_id = $1
+    `, [id]);
+
+    const row = result.rows[0];
+    res.json({
+      average_rating: row.average_rating ? parseFloat(row.average_rating) : null,
+      review_count: parseInt(row.review_count)
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
 // Start server
 app.listen(PORT, () => {
